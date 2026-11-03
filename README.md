@@ -1,8 +1,8 @@
 # portScanner
 
-Port scanner de línea de comandos construido en Python. Detecta puertos abiertos, cerrados y filtrados, captura banners de servicios y exporta los resultados a JSON.
+Port scanner de línea de comandos construido en Python. Detecta puertos abiertos, cerrados y filtrados, captura banners de servicios, **adivina el sistema operativo del host** (OS fingerprinting) y exporta los resultados a JSON.
 
-Proyecto de la Fase 1 del roadmap de Python para ciberseguridad — enfocado en el uso de `socket`, threading y manejo de errores de red.
+Proyecto de las Fases 1 y 2 del roadmap de Python para ciberseguridad: la base usa `socket`, threading y manejo de errores de red (Fase 1); la **v2** suma OS fingerprinting con paquetes crudos vía Scapy (Fase 2).
 
 ---
 
@@ -12,6 +12,7 @@ Proyecto de la Fase 1 del roadmap de Python para ciberseguridad — enfocado en 
 - **Multithreading** con `ThreadPoolExecutor` — escanea cientos de puertos en paralelo
 - **Banner grabbing** — captura la respuesta del servicio en cada puerto abierto
 - **Identificación de servicios** — mapea número de puerto a nombre (`ssh`, `http`, `ftp`, etc.)
+- **OS fingerprinting (v2)** — infiere el SO del host (Linux / Windows / Cisco) por el TTL y la ventana TCP de un SYN/ACK, y estima los saltos de red
 - **Output con colores** — verde para abiertos, rojo para cerrados, amarillo para filtrados
 - **Exportación a JSON** — guarda los resultados con timestamp automático
 - **Múltiples targets** — acepta un archivo `.txt` con hosts, uno por línea
@@ -21,9 +22,9 @@ Proyecto de la Fase 1 del roadmap de Python para ciberseguridad — enfocado en 
 ## Instalación
 
 ```bash
-git clone https://github.com/ThiagoFernandez/port-scanner.git
+git clone https://github.com/tu-usuario/portScanner.git
 cd portScanner
-pip install colorama
+pip install colorama scapy
 ```
 
 ---
@@ -33,6 +34,8 @@ pip install colorama
 ```bash
 python scanner.py <host|archivo> <puerto_inicio> <puerto_fin>
 ```
+
+> **OS fingerprinting:** usa raw sockets (Scapy), así que necesita privilegios. Corré la terminal **como administrador** (Windows, con **Npcap** instalado) o con `sudo` (Linux). Sin eso, el escaneo de puertos igual funciona pero el fingerprint se saltea. No lo pruebes contra `127.0.0.1`: Scapy sobre loopback se comporta mal.
 
 ### Ejemplos
 
@@ -80,10 +83,13 @@ Host: scanme.nmap.org (45.33.32.156)
 Puertos escaneados: 1024
 Puertos abiertos: 2
 Lista de puertos abiertos:
-- 1) Port: 22 - Service: ssh - Banner: SSH-2.0-OpenSSH_6.6.1p1
-- 2) Port: 80 - Service: http - Banner: HTTP/1.1 200 OK
+- 1) Port: 22 | Service: ssh | Banner: SSH-2.0-OpenSSH_6.6.1p1 Ubuntu-2ubuntu2.13
+- 2) Port: 80 | Service: http | Banner:
 
-[+] Resultados guardados en results_scanme.nmap.org_2026-04-24_21-00-00.json
+Realizando OS Fingerprinting sobre puerto 80...
+OS detectado: Linux | Confianza: 90% (a 22 saltos)
+
+[+] Resultados guardados en results_scanme.nmap.org_2026-11-03_12-01-06.json
 ```
 
 ### JSON de salida
@@ -107,6 +113,11 @@ Lista de puertos abiertos:
             "banner": "HTTP/1.1 200 OK\r\nServer: Apache..."
         }
     ],
+    "os_fingerprint": {
+        "os": "Linux",
+        "confidence": 90,
+        "network_hops": 22
+    },
     "time": 4.32
 }
 ```
@@ -137,6 +148,17 @@ El timeout de conexión (0.5s) es independiente del timeout de banner (1.0s), lo
 
 Usa `ThreadPoolExecutor(max_workers=200)` con `as_completed()` para procesar resultados en tiempo real a medida que cada hilo termina.
 
+### OS fingerprinting (v2)
+
+`socket.connect_ex()` deja que el kernel haga el handshake, así que el SYN/ACK del host —con su TTL y su ventana— nunca llega al programa. Para leer esos campos la v2 manda un SYN crudo con Scapy (`sr1`) a un puerto ya abierto y analiza la respuesta:
+
+| Señal | De dónde sale | Qué dice |
+|-------|---------------|----------|
+| **TTL** | capa IP del SYN/ACK | Se redondea al origen más cercano: 64 → Linux/Unix, 128 → Windows, 255 → Cisco IOS/Solaris. Los saltos se estiman como `origen − observado`. |
+| **Ventana TCP** | capa TCP del SYN/ACK | Desempate: ajusta la confianza según valores característicos de cada SO. Señal secundaria — con window scaling es menos fiable que el TTL. |
+
+> La mayoría de los routers hogareños corren **Linux embebido** (TTL 64), no TTL 255 — la firma 255 es de equipo Cisco enterprise.
+
 ---
 
 ## Dependencias
@@ -144,6 +166,7 @@ Usa `ThreadPoolExecutor(max_workers=200)` con `as_completed()` para procesar res
 | Librería | Instalación | Uso |
 |---------|------------|-----|
 | `colorama` | `pip install colorama` | Colores en terminal cross-platform |
+| `scapy` | `pip install scapy` | Paquetes crudos (SYN/ACK) para el OS fingerprinting — v2 |
 | `socket` | stdlib | Conexiones TCP, resolución DNS, servicios |
 | `concurrent.futures` | stdlib | ThreadPoolExecutor |
 | `errno` | stdlib | Códigos de error cross-platform |
@@ -165,7 +188,9 @@ Para practicar de forma legal: [scanme.nmap.org](http://scanme.nmap.org) es un s
 - `max_workers=200` puede saturar redes lentas — reducir si hay falsos FILTERED
 - Los hosts de un archivo se escanean secuencialmente
 - El banner se trunca a 1KB
+- El OS fingerprinting necesita privilegios de admin/root y un puerto abierto; los equipos que filtran el SYN crafteado (routers con anti-flood) no devuelven veredicto
+- El fingerprint por TTL es heurístico y **falsificable**: un host puede cambiar su TTL inicial para mentir
 
 ---
 
-*Parte del roadmap de Python para Ciberseguridad*
+*Parte del roadmap de Python para Ciberseguridad — Fases 1 y 2*
