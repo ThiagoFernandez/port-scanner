@@ -134,6 +134,38 @@ def scan_ports_threaded(host, raw_host, puerto_inicio, puerto_fin):
     end_time = time.time()
     return abiertos, start_time, end_time
 
+def fingerprint_os(host, open_port):
+    # sent a SYN packet with Scapy, then read the TTL + window size from the responde and return the {os, confidence} based on the fingerprinting database
+    try:
+        from scapy.all import IP, TCP, sr1
+    except ImportError:
+        print("Scapy no está instalado. La función de fingerprinting de OS no estará disponible.")
+        return None, 0
+    try:
+        pkt = IP(dst=host)/TCP(dport=open_port, flags="S")
+        resp = sr1(pkt, timeout=2, verbose=0)
+
+        if resp is None:
+            return None, 0
+
+        ttl = resp.ttl
+        window_size = resp[TCP].window
+
+        
+        if ttl <= 64:
+            os_guess = "Linux"
+            confidence = 80
+        elif ttl <= 128:
+            os_guess = "Windows"
+            confidence = 70
+        else:
+            os_guess = "Unknown"
+            confidence = 50
+
+        return os_guess, confidence
+    except Exception as e:
+        print(f"Error during OS fingerprinting: {e}")
+        return None, 0
 
 def main():
     target, puerto_inicio, puerto_fin = validate_args()
