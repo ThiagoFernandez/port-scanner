@@ -14,10 +14,9 @@ def load_hosts(file_path):
 
 def get_time():
     now = datetime.now()
-    current_time = now.strftime("%Y-%m-%d_%H-%M-%S")
-    return current_time
+    return now.strftime("%Y-%m-%d_%H-%M-%S")
 
-def create_dict(raw_host, host, puerto_inicial, puerto_fin, total, open_ports, elapsed):
+def create_dict(raw_host, host, puerto_inicial, puerto_fin, total, open_ports, elapsed, os_guess, os_confidence, hops):
     return {
         "raw_host": raw_host,
         "host": host,
@@ -31,17 +30,19 @@ def create_dict(raw_host, host, puerto_inicial, puerto_fin, total, open_ports, e
                 "banner": b
             } for (p, s, b) in open_ports
         ],
+        "os_fingerprint": {
+            "os": os_guess,
+            "confidence": os_confidence,
+            "network_hops": hops
+        },
         "time": elapsed
     }
 
 def save_results(data, raw_host):
-    file_name = "results_"+raw_host+"_" + get_time() + ".json"
-
+    file_name = f"results_{raw_host}_{get_time()}.json"
     with open(file_name, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
-    
     print(f"\n[+] Resultados guardados en {file_name}")
-
 
 def validate_args():
     if len(sys.argv) != 4:
@@ -69,7 +70,6 @@ def validate_args():
 
     return target, puerto_inicio, puerto_fin
 
-
 def scan_port(host, raw_host, port):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -94,7 +94,7 @@ def scan_port(host, raw_host, port):
 
                 return (port, "OPEN", banner)
 
-            elif result in (errno.ECONNREFUSED, 10061):  # Linux + Windows
+            elif result in (errno.ECONNREFUSED, 10061):
                 return (port, "CLOSED", "")
 
             else:
@@ -103,10 +103,8 @@ def scan_port(host, raw_host, port):
     except OSError:
         return (port, "FILTERED", "")
 
-
 def scan_ports_threaded(host, raw_host, puerto_inicio, puerto_fin):
     start_time = time.time()
-
     puertos = range(puerto_inicio, puerto_fin + 1)
     abiertos = []
 
@@ -132,40 +130,67 @@ def scan_ports_threaded(host, raw_host, puerto_inicio, puerto_fin):
                 print(f"{Fore.YELLOW}[?] {port} FILTERED{Style.RESET_ALL}")
 
     end_time = time.time()
+
+    abiertos.sort(key=lambda x: x[0])
     return abiertos, start_time, end_time
 
 def fingerprint_os(host, open_port):
-    # sent a SYN packet with Scapy, then read the TTL + window size from the responde and return the {os, confidence} based on the fingerprinting database
     try:
         from scapy.all import IP, TCP, sr1
     except ImportError:
         print("Scapy no está instalado. La función de fingerprinting de OS no estará disponible.")
-        return None, 0
+        return None, 0, None
+    
     try:
         pkt = IP(dst=host)/TCP(dport=open_port, flags="S")
         resp = sr1(pkt, timeout=2, verbose=0)
 
-        if resp is None:
-            return None, 0
+        print(f"\n[DEBUG] Respuesta Scapy (Puerto {open_port}): {resp.summary() if resp else 'SIN RESPUESTA'}")
 
-        ttl = resp.ttl
-        window_size = resp[TCP].window
+        if resp is None or not resp.haslayer(TCP):
+            return None, 0, None
 
-        
-        if ttl <= 64:
+        ttl_obs = resp.ttl
+        window = resp[TCP].window 
+
+        if ttl_obs <= 64:
+            initial_ttl = 64
             os_guess = "Linux"
-            confidence = 80
-        elif ttl <= 128:
+            confidence = 60
+        elif ttl_obs <= 128:
+            initial_ttl = 128
             os_guess = "Windows"
-            confidence = 70
+            confidence = 60
+        elif ttl_obs <= 255:
+            initial_ttl = 255
+            os_guess = "Cisco/Router/Solaris"
+            confidence = 60
         else:
-            os_guess = "Unknown"
-            confidence = 50
+            return "Unknown", 0, None
 
-        return os_guess, confidence
+        hops = initial_ttl - ttl_obs
+
+        linux_windows = {5840, 14600, 28960, 29200, 64240}
+        windows_windows = {8192, 16384, 64240, 65535}
+
+        if os_guess == "Linux":
+            if window in linux_windows and window not in windows_windows:
+                confidence += 30
+            elif window in windows_windows and window not in linux_windows:
+                confidence -= 20
+                
+        elif os_guess == "Windows":
+            if window in windows_windows and window not in linux_windows:
+                confidence += 30
+            elif window in linux_windows and window not in windows_windows:
+                confidence -= 20
+
+        confidence = max(0, min(100, confidence))
+
+        return os_guess, confidence, hops
     except Exception as e:
         print(f"Error during OS fingerprinting: {e}")
-        return None, 0
+        return None, 0, None
 
 def main():
     target, puerto_inicio, puerto_fin = validate_args()
@@ -194,13 +219,23 @@ def main():
         print(f"Host: {raw_host} ({host})")
         print(f"Puertos escaneados: {total_puertos}")
         print(f"Puertos abiertos: {len(open_ports)}")
+        
+        os_guess, confidence, hops = None, 0, None
 
         if open_ports:
             print("Lista de puertos abiertos:")
             for idx, (port, service, banner) in enumerate(open_ports, start=1):
-                print(f"- {idx}) Port: {port} - Service: {service} - Banner: {banner}")
+                print(f"- {idx}) Port: {port} | Service: {service} | Banner: {banner}")
 
-        print(f"Tiempo total: {end_time - start_time:.2f} segundos")
+            target_port = next((p for p, s, b in open_ports if p == 443), open_ports[0][0])
+            
+            print(f"\nRealizando OS Fingerprinting sobre puerto {target_port}...")
+            os_guess, confidence, hops = fingerprint_os(host, target_port)
+            if os_guess:
+                hop_info = f" (a {hops} saltos)" if hops is not None else ""
+                print(f"OS detectado: {os_guess} | Confianza: {confidence}% {hop_info}")
+
+        print(f"\nTiempo total: {end_time - start_time:.2f} segundos")
 
         data = create_dict(
             raw_host,
@@ -209,10 +244,14 @@ def main():
             puerto_fin,
             total_puertos,
             open_ports,
-            end_time - start_time
+            end_time - start_time,
+            os_guess,
+            confidence,
+            hops
         )
 
         save_results(data, raw_host)
 
 if __name__ == "__main__":
+    init()
     main()
