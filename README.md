@@ -22,7 +22,7 @@ Proyecto de las Fases 1 y 2 del roadmap de Python para ciberseguridad: la base u
 ## Instalación
 
 ```bash
-git clone https://github.com/tu-usuario/portScanner.git
+git clone https://github.com/ThiagoFernandez/portScanner.git
 cd portScanner
 pip install colorama scapy
 ```
